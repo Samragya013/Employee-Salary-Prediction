@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prediction Results</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            overflow-x: hidden;
+            position: relative;
+        }
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"%3E%3Ccircle cx="50" cy="50" r="2" fill="rgba(255,255,255,0.1)" /%3E%3C/svg%3E');
+            opacity: 0.3;
+            z-index: -1;
+            animation: particleMove 20s linear infinite;
+        }
+        @keyframes particleMove {
+            0% { background-position: 0 0; }
+            100% { background-position: 100px 100px; }
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 800px;
+            margin: 0 auto;
+            animation: fadeIn 1.2s ease-in-out;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        @keyframes fadeIn {
+            0% { opacity: 0; transform: translateY(-30px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        .header {
+            text-align: center;
+            color: #3B4CCA;
+            font-weight: 700;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+            animation: glow 2s ease-in-out infinite alternate;
+        }
+        @keyframes glow {
+            0% { text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1); }
+            100% { text-shadow: 2px 2px 8px rgba(59, 76, 202, 0.5); }
+        }
+        .subheader {
+            color: #6c757d;
+            font-size: 1.3rem;
+            text-align: center;
+            margin-bottom: 30px;
+            font-weight: 300;
+        }
+        .prediction-box {
+            background: linear-gradient(45deg, #e8f4f8, #d1e7f0);
+            padding: 25px;
+            border-radius: 15px;
+            text-align: center;
+            font-size: 1.6rem;
+            font-weight: 600;
+            color: #1a1a2e;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            animation: slideIn 0.6s ease-in-out;
+        }
+        @keyframes slideIn {
+            0% { opacity: 0; transform: translateX(-30px); }
+            100% { opacity: 1; transform: translateX(0); }
+        }
+        .probability-text {
+            font-size: 1.3rem;
+            font-weight: 400;
+            margin-top: 10px;
+            color: #1a1a2e;
+        }
+        .message-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            animation: messageFade 0.5s ease-in-out;
+            transition: transform 0.3s ease;
+        }
+        .message-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 10px rgba(0, 0, 0, 0.2);
+        }
+        @keyframes messageFade {
+            0% { opacity: 0; transform: translateY(10px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        .chart-container {
+            position: relative;
+            max-width: 350px;
+            margin: 20px auto;
+            filter: drop-shadow(0 0 15px rgba(255, 255, 255, 0.5));
+            animation: scaleIn 0.8s ease-in-out;
+        }
+        @keyframes scaleIn {
+            0% { transform: scale(0.8); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .btn-back {
+            background: linear-gradient(45deg, #3B4CCA, #28A745);
+            border: none;
+            border-radius: 10px;
+            padding: 10px 20px;
+            font-weight: 600;
+            color: white;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .btn-back:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 15px rgba(40, 167, 69, 0.5);
+        }
+        .footer {
+            text-align: center;
+            color: #ffffff;
+            margin-top: 30px;
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="header">📊 Prediction Results</h1>
+        <p class="subheader">AI-driven salary prediction with actionable insights.</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ 'success' if category == 'success' else 'danger' }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="prediction-box">
+            Predicted Salary Class: {{ prediction }} 
+            <div class="probability-text">
+                Confidence: {{ probabilities['>50K'] }}% (>50K), {{ probabilities['<=50K'] }}% (≤50K)
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <canvas id="probabilityChart"></canvas>
+        </div>
+
+        <script>
+            const ctx = document.getElementById('probabilityChart').getContext('2d');
+            const higherClass = {{ probabilities['>50K'] }} > {{ probabilities['<=50K'] }} ? '>50K' : '≤50K';
+
+            // Create gradients for pie chart
+            const chartArea = ctx.canvas.getBoundingClientRect();
+            const gradientGreen = ctx.createLinearGradient(0, 0, chartArea.width, chartArea.height);
+            gradientGreen.addColorStop(0, '#28A745');
+            gradientGreen.addColorStop(1, '#218838');
+
+            const gradientRed = ctx.createLinearGradient(0, 0, chartArea.width, chartArea.height);
+            gradientRed.addColorStop(0, '#DC3545');
+            gradientRed.addColorStop(1, '#C82333');
+
+            new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: ['>50K', '≤50K'],
+                    datasets: [{
+                        data: [{{ probabilities['>50K'] }}, {{ probabilities['<=50K'] }}],
+                        backgroundColor: [gradientGreen, gradientRed],
+                        borderColor: ['#1a1a2e', '#1a1a2e'],
+                        borderWidth: 2,
+                        hoverOffset: higherClass === '>50K' ? [40, 20] : [20, 40]
+                    }]
+                },
+                options: {
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'bottom',
+                            labels: {
+                                font: {
+                                    size: 14,
+                                    family: 'Poppins'
+                                },
+                                color: '#1a1a2e'
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return context.label + ': ' + context.parsed.toFixed(2) + '%';
+                                }
+                            }
+                        }
+                    },
+                    animation: {
+                        animateScale: true,
+                        animateRotate: true,
+                        duration: 1500,
+                        easing: 'easeOutBounce'
+                    }
+                }
+            });
+        </script>
+
+        <div class="messages-container">
+            {% for message in messages %}
+                <div class="message-card" style="color: {{ message.color }}">
+                    {{ message.text }}
+                </div>
+            {% endfor %}
+        </div>
+
+        <div class="text-center">
+            <a href="{{ url_for('index') }}" class="btn btn-back">⬅ Back to Input</a>
+        </div>
+
+        <div class="footer">
+            Developed with Flask | Powered by xAI
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
