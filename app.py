@@ -1,29 +1,35 @@
+import os
+import logging
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for
 import pandas as pd
 import joblib
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
 import io
-import os
 import PyPDF2
 import re
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key'  # Required for flash messages
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'fallback-secret-key')
 app.config['UPLOAD_FOLDER'] = 'Uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Load the trained model
-model = joblib.load("best_model.pkl")
+try:
+    model = joblib.load("best_model.pkl")
+    logger.info("Model loaded successfully")
+except Exception as e:
+    logger.error(f"Failed to load model: {str(e)}")
+    raise
 
 # Initialize LabelEncoders for categorical features
 encoders = {}
 categorical_cols = ['workclass', 'marital-status', 'occupation', 
                     'relationship', 'race', 'gender', 'native-country']
-for col in categorical_cols:
-    encoders[col] = LabelEncoder()
-
-# Define feature options based on adult.csv dataset
 feature_options = {
     'workclass': ['Private', 'Self-emp-not-inc', 'Self-emp-inc', 'Federal-gov', 
                   'Local-gov', 'State-gov'],
@@ -46,28 +52,45 @@ feature_options = {
                       'Nicaragua']
 }
 
+# Define expected feature order for the model
+expected_feature_order = ['age', 'workclass', 'educational-num', 'marital-status', 
+                         'occupation', 'relationship', 'race', 'gender', 
+                         'capital-gain', 'capital-loss', 'hours-per-week', 
+                         'native-country']
+
 # Fit encoders with all possible categories
 for col in categorical_cols:
-    encoders[col].fit(feature_options[col])
+    encoders[col] = LabelEncoder().fit(feature_options[col])
 
-# Preprocess input data
+# Preprocess input data with correct feature order
 def preprocess_input(df):
-    df_encoded = df.copy()
-    for col in categorical_cols:
-        if col in df_encoded.columns:
-            df_encoded[col] = encoders[col].transform(df_encoded[col])
-    return df_encoded
+    try:
+        # Validate input columns
+        missing_cols = [col for col in expected_feature_order if col not in df.columns]
+        if missing_cols:
+            logger.error(f"Missing columns in input DataFrame: {missing_cols}")
+            raise ValueError(f"Missing columns: {missing_cols}")
+        
+        # Select and reorder columns to match model expectations
+        df_encoded = df[expected_feature_order].copy()
+        
+        # Transform categorical columns
+        for col in categorical_cols:
+            df_encoded[col] = encoders[col].transform(df_encoded[col].astype(str))
+        
+        logger.debug(f"Preprocessed DataFrame columns: {list(df_encoded.columns)}")
+        return df_encoded
+    except Exception as e:
+        logger.error(f"Error in preprocess_input: {str(e)}")
+        raise
 
 # Parse PDF content to extract input data
 def parse_pdf(file_path):
     try:
         with open(file_path, 'rb') as file:
             reader = PyPDF2.PdfReader(file)
-            text = ''
-            for page in reader.pages:
-                text += page.extract_text() or ''
+            text = ''.join(page.extract_text() or '' for page in reader.pages)
         
-        # Define default input data
         input_data = {
             'age': 30,
             'workclass': 'Private',
@@ -83,7 +106,6 @@ def parse_pdf(file_path):
             'native-country': 'United-States'
         }
         
-        # Extract key-value pairs using regex
         patterns = {
             'age': r'Age:\s*(\d+)',
             'workclass': r'Workclass:\s*([^\n]+)',
@@ -104,100 +126,135 @@ def parse_pdf(file_path):
             if match:
                 value = match.group(1).strip()
                 if key in ['age', 'educational-num', 'capital-gain', 'capital-loss', 'hours-per-week']:
-                    input_data[key] = int(value)
+                    try:
+                        num_value = int(value)
+                        if key == 'age' and not (17 <= num_value <= 90):
+                            raise ValueError("Age out of range (17-90)")
+                        if key == 'educational-num' and not (1 <= num_value <= 16):
+                            raise ValueError("Educational-num out of range (1-16)")
+                        if key == 'hours-per-week' and not (1 <= num_value <= 100):
+                            raise ValueError("Hours-per-week out of range (1-100)")
+                        input_data[key] = num_value
+                    except ValueError as e:
+                        flash(f"Invalid {key} in PDF: {value}. {str(e)}. Using default.", 'warning')
                 else:
-                    # Validate categorical values
                     if value in feature_options[key]:
                         input_data[key] = value
                     else:
-                        flash(f'Invalid {key} in PDF: {value}. Using default: {input_data[key]}', 'warning')
+                        flash(f"Invalid {key} in PDF: {value}. Using default: {input_data[key]}", 'warning')
         
         return input_data
     except Exception as e:
-        flash(f'Error parsing PDF: {str(e)}', 'danger')
+        logger.error(f"Error parsing PDF: {str(e)}")
+        flash(f"Error parsing PDF: {str(e)}", 'danger')
         return None
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
         try:
-            if 'file' in request.files and request.files['file'].filename != '':
+            if 'file' in request.files and request.files['file'].filename:
                 file = request.files['file']
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+                file.save(file_path)
+                
                 if file.filename.endswith('.pdf'):
-                    # Handle PDF upload
-                    file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-                    file.save(file_path)
                     input_data = parse_pdf(file_path)
                     os.remove(file_path)
                     if input_data:
                         return redirect(url_for('results', **input_data))
-                    else:
-                        return redirect(url_for('index'))
+                    return redirect(url_for('index'))
                 elif file.filename.endswith('.csv'):
-                    # Handle CSV upload
-                    return redirect(url_for('batch_predict'))
+                    return redirect(url_for('batch_predict', filename=file.filename))
                 else:
+                    os.remove(file_path)
                     flash('Please upload a valid PDF or CSV file', 'danger')
                     return redirect(url_for('index'))
             
             # Handle form submission
-            input_data = {
-                'age': int(request.form.get('age', 30)),
-                'workclass': request.form.get('workclass', 'Private'),
-                'educational-num': int(request.form.get('educational-num', 10)),
-                'marital-status': request.form.get('marital-status', 'Never-married'),
-                'occupation': request.form.get('occupation', 'Prof-specialty'),
-                'relationship': request.form.get('relationship', 'Not-in-family'),
-                'race': request.form.get('race', 'White'),
-                'gender': request.form.get('gender', 'Male'),
-                'capital-gain': int(request.form.get('capital-gain', 0)),
-                'capital-loss': int(request.form.get('capital-loss', 0)),
-                'hours-per-week': int(request.form.get('hours-per-week', 40)),
-                'native-country': request.form.get('native-country', 'United-States')
-            }
+            input_data = {}
+            for key in ['age', 'educational-num', 'capital-gain', 'capital-loss', 'hours-per-week']:
+                try:
+                    value = request.form.get(key, {'age': 30, 'educational-num': 10, 'capital-gain': 0, 
+                                                  'capital-loss': 0, 'hours-per-week': 40}.get(key))
+                    num_value = int(value)
+                    if key == 'age' and not (17 <= num_value <= 90):
+                        raise ValueError("Age must be between 17 and 90")
+                    if key == 'educational-num' and not (1 <= num_value <= 16):
+                        raise ValueError("Educational-num must be between 1 and 16")
+                    if key == 'hours-per-week' and not (1 <= num_value <= 100):
+                        raise ValueError("Hours-per-week must be between 1 and 100")
+                    input_data[key] = num_value
+                except ValueError as e:
+                    flash(f"Invalid {key}: {value}. {str(e)}. Using default.", 'warning')
+                    input_data[key] = {'age': 30, 'educational-num': 10, 'capital-gain': 0, 
+                                       'capital-loss': 0, 'hours-per-week': 40}.get(key)
+            
+            for key in ['workclass', 'marital-status', 'occupation', 'relationship', 
+                        'race', 'gender', 'native-country']:
+                value = request.form.get(key, {'workclass': 'Private', 'marital-status': 'Never-married', 
+                                              'occupation': 'Prof-specialty', 'relationship': 'Not-in-family', 
+                                              'race': 'White', 'gender': 'Male', 
+                                              'native-country': 'United-States'}.get(key))
+                if value in feature_options[key]:
+                    input_data[key] = value
+                else:
+                    flash(f"Invalid {key}: {value}. Using default: {input_data[key]}", 'warning')
+            
+            logger.info(f"Form submission processed: {input_data}")
             return redirect(url_for('results', **input_data))
         
         except Exception as e:
-            flash(f'Error processing input: {str(e)}', 'danger')
+            logger.error(f"Error processing input: {str(e)}")
+            flash(f"Error processing input: {str(e)}", 'danger')
+            return redirect(url_for('index'))
     
     return render_template('index.html', feature_options=feature_options)
 
 @app.route('/results')
 def results():
     try:
-        # Collect input data from query parameters
-        input_data = {
-            'age': int(request.args.get('age', 30)),
-            'workclass': request.args.get('workclass', 'Private'),
-            'educational-num': int(request.args.get('educational-num', 10)),
-            'marital-status': request.args.get('marital-status', 'Never-married'),
-            'occupation': request.args.get('occupation', 'Prof-specialty'),
-            'relationship': request.args.get('relationship', 'Not-in-family'),
-            'race': request.args.get('race', 'White'),
-            'gender': request.args.get('gender', 'Male'),
-            'capital-gain': int(request.args.get('capital-gain', 0)),
-            'capital-loss': int(request.args.get('capital-loss', 0)),
-            'hours-per-week': int(request.args.get('hours-per-week', 40)),
-            'native-country': request.args.get('native-country', 'United-States')
-        }
+        input_data = {}
+        for key in ['age', 'educational-num', 'capital-gain', 'capital-loss', 'hours-per-week']:
+            try:
+                value = request.args.get(key, {'age': 30, 'educational-num': 10, 'capital-gain': 0, 
+                                              'capital-loss': 0, 'hours-per-week': 40}.get(key))
+                num_value = int(value)
+                if key == 'age' and not (17 <= num_value <= 90):
+                    raise ValueError("Age must be between 17 and 90")
+                if key == 'educational-num' and not (1 <= num_value <= 16):
+                    raise ValueError("Educational-num must be between 1 and 16")
+                if key == 'hours-per-week' and not (1 <= num_value <= 100):
+                    raise ValueError("Hours-per-week must be between 1 and 100")
+                input_data[key] = num_value
+            except ValueError as e:
+                flash(f"Invalid {key}: {value}. {str(e)}. Using default.", 'warning')
+                input_data[key] = {'age': 30, 'educational-num': 10, 'capital-gain': 0, 
+                                   'capital-loss': 0, 'hours-per-week': 40}.get(key)
         
-        # Create DataFrame
+        for key in ['workclass', 'marital-status', 'occupation', 'relationship', 
+                    'race', 'gender', 'native-country']:
+            value = request.args.get(key, {'workclass': 'Private', 'marital-status': 'Never-married', 
+                                          'occupation': 'Prof-specialty', 'relationship': 'Not-in-family', 
+                                          'race': 'White', 'gender': 'Male', 
+                                          'native-country': 'United-States'}.get(key))
+            if value in feature_options[key]:
+                input_data[key] = value
+            else:
+                flash(f"Invalid {key}: {value}. Using default: {input_data[key]}", 'warning')
+        
         input_df = pd.DataFrame([input_data])
-        
-        # Preprocess and predict
         input_processed = preprocess_input(input_df)
         prediction = model.predict(input_processed)[0]
         prediction = '>50K' if prediction == 1 else '≤50K'
         probabilities = model.predict_proba(input_processed)[0] * 100
         probabilities = {'<=50K': round(probabilities[0], 2), '>50K': round(probabilities[1], 2)}
         
-        # Generate context-aware messages
         messages = []
         message_color = '#28A745' if probabilities['>50K'] > probabilities['<=50K'] else '#DC3545'
         higher_class = '>50K' if probabilities['>50K'] > probabilities['<=50K'] else '≤50K'
         higher_prob = max(probabilities['>50K'], probabilities['<=50K'])
         
-        # Primary message based on higher probability
         if higher_prob >= 80:
             messages.append({
                 'text': f"Strong confidence: {higher_prob}% likelihood of earning {higher_class} annually.",
@@ -214,7 +271,6 @@ def results():
                 'color': message_color
             })
         
-        # Additional contextual messages
         if higher_class == '>50K':
             messages.append({
                 'text': "This suggests a strong career trajectory. Consider leveraging skills in high-demand fields like tech or management.",
@@ -246,100 +302,94 @@ def results():
                     'color': '#6c757d'
                 })
         
+        logger.info(f"Prediction for input: {input_data}, Result: {prediction}")
         return render_template('results.html', 
                              prediction=prediction, 
                              probabilities=probabilities, 
                              messages=messages)
     
     except Exception as e:
-        flash(f'Error processing prediction: {str(e)}', 'danger')
+        logger.error(f"Error processing prediction: {str(e)}")
+        flash(f"Error processing prediction: {str(e)}", 'danger')
         return redirect(url_for('index'))
 
 @app.route('/batch_predict', methods=['POST'])
 def batch_predict():
-    if 'file' not in request.files:
+    if 'file' not in request.files or not request.files['file'].filename:
         flash('No file uploaded', 'danger')
         return redirect(url_for('index'))
     
     file = request.files['file']
-    if file.filename == '':
-        flash('No file selected', 'danger')
-        return redirect(url_for('index'))
-    
-    if file and file.filename.endswith('.csv'):
-        try:
-            # Save and read uploaded file
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-            file.save(file_path)
-            batch_data = pd.read_csv(file_path)
-            
-            # Validate columns
-            expected_cols = ['age', 'workclass', 'educational-num', 
-                            'marital-status', 'occupation', 'relationship', 'race', 
-                            'gender', 'capital-gain', 'capital-loss', 'hours-per-week', 
-                            'native-country']
-            if not all(col in batch_data.columns for col in expected_cols):
-                flash('CSV file must contain all required columns', 'danger')
-                os.remove(file_path)
-                return redirect(url_for('index'))
-            
-            # Check if CSV has exactly one row
-            if len(batch_data) == 1:
-                # Validate and extract data for single-row CSV
-                input_data = {}
-                for col in expected_cols:
-                    value = batch_data.iloc[0][col]
-                    if col in ['age', 'educational-num', 'capital-gain', 'capital-loss', 'hours-per-week']:
-                        try:
-                            input_data[col] = int(value)
-                        except (ValueError, TypeError):
-                            flash(f'Invalid {col} in CSV: {value}. Using default.', 'warning')
-                            input_data[col] = {'age': 30, 'educational-num': 10, 'capital-gain': 0, 
-                                              'capital-loss': 0, 'hours-per-week': 40}.get(col)
-                    elif col in categorical_cols:
-                        if pd.isna(value) or str(value).strip() not in feature_options[col]:
-                            flash(f'Invalid {col} in CSV: {value}. Using default.', 'warning')
-                            input_data[col] = {'workclass': 'Private', 'marital-status': 'Never-married', 
-                                              'occupation': 'Prof-specialty', 'relationship': 'Not-in-family', 
-                                              'race': 'White', 'gender': 'Male', 
-                                              'native-country': 'United-States'}.get(col)
-                        else:
-                            input_data[col] = str(value).strip()
-                
-                os.remove(file_path)
-                return redirect(url_for('results', **input_data))
-            
-            # Process batch CSV (multiple rows)
-            batch_processed = preprocess_input(batch_data)
-            batch_preds = model.predict(batch_processed)
-            batch_probs = model.predict_proba(batch_processed) * 100
-            batch_data['PredictedClass'] = np.where(batch_preds == 1, '>50K', '≤50K')
-            batch_data['Probability_<=50K (%)'] = batch_probs[:, 0].round(2)
-            batch_data['Probability_>50K (%)'] = batch_probs[:, 1].round(2)
-            
-            # Save predictions to CSV
-            output = io.StringIO()
-            batch_data.to_csv(output, index=False)
-            output.seek(0)
-            
-            # Clean up
-            os.remove(file_path)
-            
-            return send_file(
-                io.BytesIO(output.getvalue().encode('utf-8')),
-                mimetype='text/csv',
-                as_attachment=True,
-                download_name='predicted_salary_classes.csv'
-            )
+    try:
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        file.save(file_path)
         
-        except Exception as e:
-            flash(f'Error processing batch prediction: {str(e)}', 'danger')
-            if os.path.exists(file_path):
-                os.remove(file_path)
+        batch_data = pd.read_csv(file_path)
+        if not all(col in batch_data.columns for col in expected_feature_order):
+            missing_cols = [col for col in expected_feature_order if col not in batch_data.columns]
+            flash(f"CSV file must contain all required columns: {', '.join(expected_feature_order)}. Missing: {', '.join(missing_cols)}", 'danger')
+            os.remove(file_path)
             return redirect(url_for('index'))
+        
+        if len(batch_data) == 1:
+            input_data = {}
+            for col in expected_feature_order:
+                value = batch_data.iloc[0][col]
+                if col in ['age', 'educational-num', 'capital-gain', 'capital-loss', 'hours-per-week']:
+                    try:
+                        num_value = int(value)
+                        if col == 'age' and not (17 <= num_value <= 90):
+                            raise ValueError("Age must be between 17 and 90")
+                        if col == 'educational-num' and not (1 <= num_value <= 16):
+                            raise ValueError("Educational-num must be between 1 and 16")
+                        if col == 'hours-per-week' and not (1 <= num_value <= 100):
+                            raise ValueError("Hours-per-week must be between 1 and 100")
+                        input_data[col] = num_value
+                    except (ValueError, TypeError) as e:
+                        flash(f"Invalid {col} in CSV: {value}. {str(e)}. Using default.", 'warning')
+                        input_data[col] = {'age': 30, 'educational-num': 10, 'capital-gain': 0, 
+                                           'capital-loss': 0, 'hours-per-week': 40}.get(col)
+                elif col in categorical_cols:
+                    value_str = str(value).strip()
+                    if pd.isna(value) or value_str not in feature_options[col]:
+                        flash(f"Invalid {col} in CSV: {value}. Using default.", 'warning')
+                        input_data[col] = {'workclass': 'Private', 'marital-status': 'Never-married', 
+                                           'occupation': 'Prof-specialty', 'relationship': 'Not-in-family', 
+                                           'race': 'White', 'gender': 'Male', 
+                                           'native-country': 'United-States'}.get(col)
+                    else:
+                        input_data[col] = value_str
+            
+            os.remove(file_path)
+            logger.info(f"Single-row CSV processed: {input_data}")
+            return redirect(url_for('results', **input_data))
+        
+        batch_processed = preprocess_input(batch_data)
+        batch_preds = model.predict(batch_processed)
+        batch_probs = model.predict_proba(batch_processed) * 100
+        batch_data['PredictedClass'] = np.where(batch_preds == 1, '>50K', '≤50K')
+        batch_data['Probability_<=50K (%)'] = batch_probs[:, 0].round(2)
+        batch_data['Probability_>50K (%)'] = batch_probs[:, 1].round(2)
+        
+        output = io.StringIO()
+        batch_data.to_csv(output, index=False)
+        output.seek(0)
+        
+        os.remove(file_path)
+        logger.info(f"Batch CSV processed: {len(batch_data)} rows")
+        return send_file(
+            io.BytesIO(output.getvalue().encode('utf-8')),
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name='predicted_salary_classes.csv'
+        )
     
-    flash('Please upload a valid CSV file', 'danger')
-    return redirect(url_for('index'))
+    except Exception as e:
+        logger.error(f"Error processing batch prediction: {str(e)}")
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        flash(f"Error processing batch prediction: {str(e)}", 'danger')
+        return redirect(url_for('index'))
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0')
